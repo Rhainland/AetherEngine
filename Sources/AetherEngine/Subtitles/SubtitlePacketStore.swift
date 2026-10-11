@@ -127,7 +127,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// this store gives is only as good as the reading behind it. See `SubtitleHarvestCoverage`.
     private var coverage = SubtitleHarvestCoverage()
     /// Highest PTS an eviction or prune has removed per stream since the prefetch's current run
-    /// began. Coverage records what was read, not what is still held, so a span at or behind this
+    /// began, or a display set the prefetch read has been dropped at. Coverage records what was read, not what is still held, so a span at or behind this
     /// may have been read and dropped since. A new run re-reads its ground and stores it again.
     private var evictedThroughByStream: [Int32: Double] = [:]
     /// Where the prefetch's current run was announced, and where it is known to have read from:
@@ -389,10 +389,8 @@ final class SubtitlePacketStore: @unchecked Sendable {
             guard totalBytes > lowWater else { break }
             // Audit SUB-111: an unfinished display set of a cold stream goes before anything complete.
             for writer in [Writer.pump, Writer.prefetch] {
-                // The prefetch read that set, and no read proof may reach past it now.
-                if let dropped = takePendingLocked(PendingKey(streamIndex: idx, writer: writer)),
-                   writer == .prefetch {
-                    noteEvictedLocked(idx, through: dropped.ptsSeconds)
+                if let dropped = takePendingLocked(PendingKey(streamIndex: idx, writer: writer)) {
+                    noteDroppedSetLocked(dropped, streamIndex: idx, writer: writer)
                 }
             }
             guard totalBytes > lowWater, var entries = entriesByStream.removeValue(forKey: idx) else {
@@ -504,7 +502,10 @@ final class SubtitlePacketStore: @unchecked Sendable {
             let firstType = Self.pgsFirstSegmentType(in: chunk)
             if firstType == 0x16 {
                 // PCS opens a display set; an unfinished predecessor (missing END, or the
-                // restart overlap above) is undecodable on its own and gets dropped.
+                // restart overlap above) gets dropped.
+                if let unfinished = pending {
+                    noteDroppedSetLocked(unfinished, streamIndex: streamIndex, writer: writer)
+                }
                 pending = nil
                 guard let pts = ptsSeconds else {
                     return   // No anchor for this set; skip its chunks until the next PCS.
@@ -529,6 +530,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
             open.payload.append(consumed)
             open.flags |= flags
             if open.payload.count > Self.maxPendingDisplaySetBytes {
+                noteDroppedSetLocked(open, streamIndex: streamIndex, writer: writer)
                 return
             }
             if endBoundary != nil {
@@ -643,6 +645,12 @@ final class SubtitlePacketStore: @unchecked Sendable {
         evictedThroughByStream.removeAll()
         prefetchAnchor = nil
         prefetchReadFrom = nil
+    }
+
+    /// A display set the prefetch read is dropped without being stored, so read proof must not
+    /// reach past it until the prefetch reads that ground again.
+    private func noteDroppedSetLocked(_ set: PendingDisplaySet, streamIndex: Int32, writer: Writer) {
+        if writer == .prefetch { noteEvictedLocked(streamIndex, through: set.ptsSeconds) }
     }
 
     private func noteEvictedLocked(_ streamIndex: Int32, through pts: Double) {

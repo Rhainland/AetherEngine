@@ -272,6 +272,30 @@ struct Issue362HarvestHoleTests {
                 "the dropped set was read but never stored")
     }
 
+    @Test("a display set dropped unfinished or oversize still bounds the proof")
+    func droppedPendingSetsBoundTheProof() {
+        let pcs = Data([0x16, 0x00, 0x01, 0x00]), end = Data([0x80, 0x00, 0x00])
+        func chunk(_ store: SubtitlePacketStore, _ payload: Data, at pts: Double) {
+            store.harvestChunk(streamIndex: 3, ptsSeconds: pts, durationSeconds: 0, flags: 0,
+                               payload: payload, assembleSplitDisplaySets: true, writer: .prefetch)
+        }
+        // The next composition opens before this one's END arrives.
+        let replaced = SubtitlePacketStore()
+        replaced.notePrefetchRead(from: 0, through: 100)
+        chunk(replaced, pcs, at: 110)
+        chunk(replaced, pcs + end, at: 120)
+        replaced.noteHarvestProgress(.prefetch, through: 130)
+        #expect(!replaced.provesReadSpan(streamIndex: 3, from: 100, through: 130))
+        #expect(replaced.provesReadSpan(streamIndex: 3, from: 111, through: 130))
+
+        // A set over the assembly budget is dropped too.
+        let oversize = SubtitlePacketStore()
+        oversize.notePrefetchRead(from: 0, through: 100)
+        chunk(oversize, Data([0x16, 0xFF, 0xFF]) + Data(count: SubtitlePacketStore.maxPendingDisplaySetBytes), at: 110)
+        oversize.noteHarvestProgress(.prefetch, through: 130)
+        #expect(!oversize.provesReadSpan(streamIndex: 3, from: 100, through: 130))
+    }
+
     private func harvest(_ store: SubtitlePacketStore, at pts: Double) {
         store.harvestChunk(streamIndex: 3, ptsSeconds: pts, durationSeconds: 0, flags: 0,
                            payload: Data(count: 8), assembleSplitDisplaySets: false, writer: .prefetch)
