@@ -135,6 +135,97 @@ struct Issue362HarvestHoleTests {
                 > refreshed.first(where: { $0.ptsSeconds == 280.023 })!.sequence)
     }
 
+    @Test("a seam over ground some run has read is a re-harvest, not a hole")
+    func readSeamIsNotAHole() {
+        // The forward prefetch stored 0-60 s first; the pump re-read 0-4.38 s behind it, and each of
+        // those duplicates took a fresh sequence. The order breaks at 4.38 over ground the prefetch
+        // has read, and that seam moves with the pump on every tick.
+        let pts = [4.0, 4.38, 4.40, 4.42]
+        let sequence: [UInt64] = [900, 901, 400, 401]
+        func seamCut(isRead: @escaping (Double, Double) -> Bool) -> (index: Int, at: Double, sequence: UInt64)? {
+            SubtitleOverlayDrainer.harvestGapCut(count: pts.count, ptsAt: { pts[$0] },
+                                                 sequenceAt: { sequence[$0] }, resumeFrom: nil,
+                                                 notBefore: 0, isRead: isRead)
+        }
+        #expect(seamCut { _, _ in true } == nil)
+        #expect(seamCut { _, _ in false }?.index == 2, "without proof the order rule stands")
+        #expect(cut()?.index == 2, "the reported hole is unread ground, so it still holds")
+    }
+
+    @Test("only a current run proves a span read; an empty ledger refuses no landing but proves nothing")
+    func proofNeedsOneCurrentRun() {
+        let store = SubtitlePacketStore()
+        #expect(store.hasReadSpan(from: 1, through: 2))
+        #expect(!store.provesReadSpan(streamIndex: 3, from: 1, through: 2))
+        store.noteHarvestAnchor(.prefetch, at: 0, verified: true)
+        store.noteHarvestReach(.prefetch, through: 60)
+        #expect(store.provesReadSpan(streamIndex: 3, from: 4.38, through: 4.40))
+        #expect(!store.provesReadSpan(streamIndex: 3, from: 59, through: 61))
+    }
+
+    @Test("a real hole inside the seam tolerance is not proven read")
+    func seamToleranceProvesNothing() {
+        // One prefetch run read to 4.38 and stopped; the next started at 4.60. The ledger's seam
+        // tolerance joins them for `hasReadSpan`, but nobody read the 0.22 s between.
+        let store = SubtitlePacketStore()
+        store.noteHarvestAnchor(.prefetch, at: 0, verified: true)
+        store.noteHarvestProgress(.prefetch, through: 4.38)
+        store.noteHarvestAnchor(.prefetch, at: 4.60, verified: true)
+        store.noteHarvestProgress(.prefetch, through: 30)
+        #expect(store.hasReadSpan(from: 4.38, through: 4.60))
+        #expect(!store.provesReadSpan(streamIndex: 3, from: 4.38, through: 4.60))
+        #expect(store.provesReadSpan(streamIndex: 3, from: 4.60, through: 30))
+    }
+
+    @Test("the pump's reach is a claim from the playhead, not proof of reading")
+    func pumpReachProvesNothing() {
+        // During a slow seek the playhead, and with it the pump's stated reach, can move past what
+        // the pump has stored.
+        let store = SubtitlePacketStore()
+        store.noteHarvestAnchor(.pump, at: 0)
+        store.noteHarvestReach(.pump, through: 60)
+        #expect(store.hasReadSpan(from: 4.38, through: 4.40))
+        #expect(!store.provesReadSpan(streamIndex: 3, from: 4.38, through: 4.40))
+    }
+
+    @Test("ground the store has evicted is not proven read, however it was covered")
+    func evictedGroundProvesNothing() {
+        let store = SubtitlePacketStore()
+        store.noteHarvestAnchor(.prefetch, at: 0, verified: true)
+        store.noteHarvestReach(.prefetch, through: 60)
+        for pts in [1.0, 2.0, 3.0, 40.0] {
+            store.append(streamIndex: 3, ptsSeconds: pts, durationSeconds: 0, payload: Data(count: 8))
+        }
+        store.prune(before: 2.5)
+        #expect(!store.provesReadSpan(streamIndex: 3, from: 1.5, through: 30))
+        #expect(store.provesReadSpan(streamIndex: 3, from: 2.5, through: 30))
+        #expect(store.provesReadSpan(streamIndex: 4, from: 1.5, through: 30), "eviction is per stream")
+        // A new prefetch run reads the ground again and stores what the prune removed.
+        store.noteHarvestAnchor(.prefetch, at: 0, verified: true)
+        for pts in [1.0, 2.0] { harvest(store, at: pts) }
+        store.noteHarvestProgress(.prefetch, through: 30)
+        #expect(store.entries(streamIndex: 3, from: 0, through: 30).map(\.ptsSeconds) == [1, 2, 3])
+        #expect(store.provesReadSpan(streamIndex: 3, from: 1.5, through: 30))
+    }
+
+    @Test("a prefetch run from an unverified position proves nothing")
+    func unverifiedLandingProvesNothing() {
+        // A byte-estimate fallback asked for 100 s may have landed at 120 s; its first packet there
+        // must not prove 100-120 s read.
+        let store = SubtitlePacketStore()
+        store.noteHarvestAnchor(.prefetch, at: 100)
+        harvest(store, at: 120)
+        store.noteHarvestProgress(.prefetch, through: 130)
+        #expect(store.hasReadSpan(from: 100, through: 120), "the generous ledger still counts it")
+        #expect(!store.provesReadSpan(streamIndex: 3, from: 100, through: 120))
+        #expect(!store.provesReadSpan(streamIndex: 3, from: 121, through: 129))
+    }
+
+    private func harvest(_ store: SubtitlePacketStore, at pts: Double) {
+        store.harvestChunk(streamIndex: 3, ptsSeconds: pts, durationSeconds: 0, flags: 0,
+                           payload: Data(count: 8), assembleSplitDisplaySets: false, writer: .prefetch)
+    }
+
     @Test("the store stamps harvest order, ascending, across streams")
     func sequenceIsMonotonic() {
         let store = SubtitlePacketStore()

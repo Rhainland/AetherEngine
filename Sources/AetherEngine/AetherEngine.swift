@@ -1325,6 +1325,18 @@ public final class AetherEngine: ObservableObject {
     /// cues around the playhead still land in the first batch and the rest of the 60 s lead fills
     /// over the following ticks.
     nonisolated static let subtitleDrainMaxPacketsPerTick: Int = 256
+    /// How far past the playhead every tick decodes, whatever `subtitleDrainMaxPacketsPerTick` says.
+    /// The cap keeps a steady tick small, but it also caps throughput at 512 packets a second, and a
+    /// typeset ASS track re-times every sign on every frame: a fixture with 8 to 12 tracked signs
+    /// carries 430 to 620 events a second. Capped, a reset's 15 s backscan alone took 25 ticks, and
+    /// a drain behind the playhead in such a passage never caught up, so after a seek or a resume
+    /// the signs stayed missing until the passage ended. A tick whose window starts short of this
+    /// horizon decodes through it. 12 s covers a host that advances its subtitles by up to 10 s.
+    nonisolated static let subtitleDrainUrgentLeadSeconds: Double = 12
+    /// Upper bound on such a catch-up tick, so a pathologically dense window still yields between
+    /// ticks. A seek into the 620-a-second passage needs about 16 700 packets (backscan plus urgent
+    /// lead), so it catches up within two ticks.
+    nonisolated static let subtitleDrainMaxCatchUpPacketsPerTick: Int = 16_384
     /// Phase D: the OCR worker decodes bitmap compositions to playhead + this lead so AVKit's
     /// ~240 s forward .vtt prefetch burst at selection is served populated, never cached empty.
     nonisolated static let subtitleOCRLeadSeconds: Double = 240

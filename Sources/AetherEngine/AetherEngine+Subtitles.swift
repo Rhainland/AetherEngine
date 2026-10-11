@@ -435,10 +435,16 @@ extension AetherEngine {
                                         from: window.from, through: window.through)
             // #271: bound the batch, on a PTS boundary. The window is bounded in seconds of
             // content, so on a dense track it is thousands of packets and this loop has no
-            // suspension point.
+            // suspension point. A text drain behind the urgent horizon takes everything up to it.
             let batchEnd = SubtitleOverlayDrainer.batchEnd(
                 count: entries.count,
-                cap: Self.subtitleDrainMaxPacketsPerTick,
+                cap: SubtitleOverlayDrainer.tickCap(
+                    count: entries.count,
+                    cap: Self.subtitleDrainMaxPacketsPerTick,
+                    urgentThrough: playhead + Self.subtitleDrainUrgentLeadSeconds,
+                    catchUpCap: Self.subtitleDrainMaxCatchUpPacketsPerTick,
+                    catchesUp: EmbeddedSubtitleDecoder.drainCatchesUp(decoder.codecID),
+                    ptsAt: { entries[$0].ptsSeconds }),
                 ptsAt: { entries[$0].ptsSeconds })
             // #362: stop at a hole the harvest is still filling instead of decoding across it and
             // moving the cursor to its far side, which is how a stretch of the film loses its
@@ -453,12 +459,18 @@ extension AetherEngine {
             let held = subtitleDrainCursors[channel]
             // The playhead catching up to the hold ends it whatever the budget says: from there on
             // the island is what the viewer is about to need, and waiting would dark the overlay
-            // for content that IS stored. That, not the tick budget, is the real bound.
+            // for content that IS stored. That, not the tick budget, is the real bound. So does a
+            // run having read the span since: the hole has been filled even if no packet in the
+            // window carries that run's sequence.
+            let spanRead: (Double, Double) -> Bool = {
+                store.provesReadSpan(streamIndex: streamIndex, from: $0, through: $1)
+            }
             if let heldAt = held?.harvestGapAt, heldAt >= playhead,
                (held?.harvestGapTicksLeft ?? 0) > 0, !isReset,
                !SubtitleOverlayDrainer.harvestGapHoldResumes(
                 firstSequence: entries.first?.sequence,
-                heldSequence: held?.harvestGapSequence ?? 0) {
+                heldSequence: held?.harvestGapSequence ?? 0),
+               !(entries.first.map { spanRead(heldAt, $0.ptsSeconds) } ?? false) {
                 // Still waiting: the window past the hold begins with the same island as before.
                 decodeEnd = 0
                 gapHoldAt = heldAt
@@ -469,7 +481,8 @@ extension AetherEngine {
                 ptsAt: { entries[$0].ptsSeconds },
                 sequenceAt: { entries[$0].sequence },
                 resumeFrom: isReset ? nil : held.map { ($0.lastDecodedPts, $0.lastDecodedSequence) },
-                notBefore: playhead), held?.harvestGapAt != cut.at || (held?.harvestGapTicksLeft ?? 0) > 0 {
+                notBefore: playhead,
+                isRead: spanRead), held?.harvestGapAt != cut.at || (held?.harvestGapTicksLeft ?? 0) > 0 {
                 decodeEnd = cut.index
                 gapHoldAt = cut.at
                 gapHoldSequence = cut.sequence
@@ -535,6 +548,8 @@ extension AetherEngine {
             // #362: the cursor's own harvest sequence rides with it, so the next tick can tell
             // whether its first entry was read by the same run or is the far side of a hole.
             var lastDecodedSequence = subtitleDrainCursors[channel]?.lastDecodedSequence ?? 0
+            // Text cues of this batch, merged into `cues` in one pass (see SubtitleCueInsertBatch).
+            var textBatch = SubtitleCueInsertBatch()
             for (entry, decoded) in zip(entries[..<decodeEnd], events) {
                 if let event = decoded {
                     tally.events += 1
@@ -542,7 +557,8 @@ extension AetherEngine {
                     // A cue-less event still matters: a PGS clear composition carries only
                     // pgsTrimAt and is what removes the line during silence.
                     if !event.cues.isEmpty || event.pgsTrimAt != nil {
-                        let applied = applySubtitleEvent(event, to: &cues, channel: channel)
+                        let applied = applySubtitleEvent(event, to: &cues, batch: &textBatch,
+                                                         channel: channel)
                         tally.admitted += applied.admitted
                         tally.published += applied.published
                         tally.landingWithheld += applied.landingWithheld   // #416
@@ -552,6 +568,7 @@ extension AetherEngine {
                 lastDecoded = entry.ptsSeconds
                 lastDecodedSequence = entry.sequence
             }
+            textBatch.merge(into: &cues)
             if case .resetAndDecode = plan, batchEnd == 0 {
                 // Fresh window with nothing stored yet: anchor just behind the window start so
                 // steady ticks rescan it without re-triggering the discontinuity path.
@@ -944,7 +961,7 @@ extension AetherEngine {
         // #416: this session reads forwards from here, and nothing below it is this reader's to
         // claim. Stated even when the positioning fell back or failed: what the loop then reads is
         // still forwards from wherever it sits, and the anchor is the earliest it can be.
-        store.noteHarvestAnchor(.prefetch, at: startAt)
+        store.noteHarvestAnchor(.prefetch, at: startAt, verified: landed == .seek)
         if landed != .seek {
             EngineLog.emit(
                 "[AetherEngine] #151 forward prefetch seek to \(String(format: "%.2f", startAt))s timed out "
@@ -1056,9 +1073,14 @@ extension AetherEngine {
     /// new (a re-decoded cue the store already holds, a trim matching no open window) must not cost a
     /// publication: on a dense track that is the common case, and each publication makes every
     /// consumer walk the whole cumulative snapshot (#271).
+    ///
+    /// A text-only event goes into `batch`, which the caller merges into `cues` once the batch is
+    /// done; anything else merges what the batch holds first, so the array it trims or replaces in
+    /// is the one per-cue inserts would have left.
     @discardableResult
     private func applySubtitleEvent(_ event: EmbeddedSubtitleDecoder.SubtitleEvent,
                                     to cues: inout [SubtitleCue],
+                                    batch: inout SubtitleCueInsertBatch,
                                     channel: SubtitleChannel) -> SubtitleDeliveryStatement.Application {
         guard isSubtitleActive(for: channel) else { return .init() }
 
@@ -1084,7 +1106,18 @@ extension AetherEngine {
             )
         }
 
-        return applyEventMutations(event, to: &cues, channel: channel)
+        guard SubtitleCueInsertBatch.accepts(event) else {
+            batch.merge(into: &cues)
+            return applyEventMutations(event, to: &cues, channel: channel)
+        }
+        // What applyEventMutations does for such an event, the stale-arrival gate being PGS-only.
+        var applied = SubtitleDeliveryStatement.Application()
+        applied.admitted = event.cues.count
+        for cue in event.cues where batch.add(cue, existing: cues, nextID: &nextRetainedSubtitleCueID) {
+            applied.changed = true
+            applied.published += 1
+        }
+        return applied
     }
 
     /// PGS clear-event trim + sorted insert. Native mov_text stores (#55) are NOT fed here; those are owned by the multi-decode reader.

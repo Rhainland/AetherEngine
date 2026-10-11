@@ -113,6 +113,12 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// the object whose EMPTINESS gets interpreted: every "no packet between here and there" answer
     /// this store gives is only as good as the reading behind it. See `SubtitleHarvestCoverage`.
     private var coverage = SubtitleHarvestCoverage()
+    /// Highest PTS an eviction or prune has removed per stream since the prefetch's current run
+    /// began. Coverage records what was read, not what is still held, so a span at or behind this
+    /// may have been read and dropped since. A new run re-reads its ground and stores it again.
+    private var evictedThroughByStream: [Int32: Double] = [:]
+    /// Whether the prefetch's current run began at a verified position; see `noteHarvestAnchor`.
+    private var prefetchRunIsVerified = false
     private var protectedStreams: Set<Int32> = []
     private var lastTouchByStream: [Int32: UInt64] = [:]
     private var touchCounter: UInt64 = 0
@@ -143,9 +149,18 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// #416: a reader has positioned at `seconds` and reads forwards from there. Announced by every
     /// reposition of every reader that writes here, because an unannounced one would let the run
     /// below be extended across ground nobody read.
-    func noteHarvestAnchor(_ writer: Writer, at seconds: Double) {
+    ///
+    /// `verified` says the reader is known to read from at or before `seconds`: a timestamp seek on
+    /// the subtitle axis. A byte-estimate fallback can overshoot and a failed positioning leaves the
+    /// reader wherever it was, so a prefetch run anchored that way still counts for `hasReadSpan`
+    /// but proves nothing to `provesReadSpan`.
+    func noteHarvestAnchor(_ writer: Writer, at seconds: Double, verified: Bool = false) {
         lock.lock(); defer { lock.unlock() }
         coverage.noteAnchor(writer, at: seconds)
+        if writer == .prefetch {
+            prefetchRunIsVerified = verified
+            evictedThroughByStream.removeAll()
+        }
     }
 
     /// #416: that reader's current run has read one step further, through `seconds`.
@@ -170,6 +185,22 @@ final class SubtitlePacketStore: @unchecked Sendable {
     func hasReadSpan(from: Double, through: Double) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return coverage.isEmpty || coverage.covers(from: from, through: through)
+    }
+
+    /// Whether the forward prefetch's current run read the whole span and this stream still holds
+    /// what it read there. Stricter than `hasReadSpan` on purpose: a caller that drops a precaution
+    /// on this answer needs proof, so an empty ledger, a span bridged by seam tolerance, ground the
+    /// store has since evicted, and a run from an unverified position all answer no. So does the
+    /// pump's coverage, which is a claim from the playhead (`noteHarvestReach`) rather than
+    /// observed reading, and can run ahead of what the pump has stored during a slow seek.
+    ///
+    /// A prefetch that re-anchors starts a new run, so what its previous run stored proves nothing
+    /// until the new one reads it again; a seam there holds as it did before this proof existed.
+    func provesReadSpan(streamIndex: Int32, from: Double, through: Double) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard prefetchRunIsVerified else { return false }
+        if let evicted = evictedThroughByStream[streamIndex], from <= evicted { return false }
+        return coverage.currentRunContains(.prefetch, from: from, through: through)
     }
 
     /// Introspection for tests and diagnostics.
@@ -229,6 +260,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
                 bytes -= entries[dropped].payload.count
                 dropped += 1
             }
+            if dropped > 0 { noteEvictedLocked(streamIndex, through: entries[dropped - 1].ptsSeconds) }
             entries.removeFirst(dropped)
             payloadHashesByRun[streamIndex] = nil
         }
@@ -327,6 +359,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
                 totalBytes -= removed
                 dropped += 1
             }
+            if dropped > 0 { noteEvictedLocked(idx, through: entries[dropped - 1].ptsSeconds) }
             entries.removeFirst(dropped)
             payloadHashesByRun[idx] = nil
             if entries.isEmpty {
@@ -530,6 +563,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
         for (idx, entries) in entriesByStream {
             let kept = entries.drop { $0.ptsSeconds < cutoff }
             if kept.count != entries.count {
+                noteEvictedLocked(idx, through: entries[entries.count - kept.count - 1].ptsSeconds)
                 let newBytes = kept.reduce(0) { $0 + $1.payload.count }
                 totalBytes += newBytes - (bytesByStream[idx] ?? 0)
                 entriesByStream[idx] = Array(kept)
@@ -551,5 +585,11 @@ final class SubtitlePacketStore: @unchecked Sendable {
         touchCounter = 0
         appendCounter = 0
         coverage = SubtitleHarvestCoverage()
+        evictedThroughByStream.removeAll()
+        prefetchRunIsVerified = false
+    }
+
+    private func noteEvictedLocked(_ streamIndex: Int32, through pts: Double) {
+        evictedThroughByStream[streamIndex] = max(evictedThroughByStream[streamIndex] ?? -.infinity, pts)
     }
 }
