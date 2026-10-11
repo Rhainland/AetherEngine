@@ -122,12 +122,11 @@ struct SubtitleHarvestCoverage: Sendable, Equatable {
         return cursor >= through
     }
 
-    /// Whether `writer`'s current run read the whole span, with no seam tolerance and nothing
-    /// merged from finished runs. A run is contiguous by construction, so this is exact where
-    /// `covers` is generous: a merged history can bridge up to `seamSeconds` nobody read.
-    func currentRunContains(_ writer: SubtitlePacketStore.Writer, from: Double, through: Double) -> Bool {
-        guard from.isFinite, through.isFinite, let run = open[writer] else { return false }
-        return run.from <= from && run.through >= through
+    /// `writer`'s current run, with no seam tolerance and nothing merged from finished runs. A run
+    /// is contiguous by construction, so this is exact where `covers` is generous: a merged history
+    /// can bridge up to `seamSeconds` nobody read.
+    func currentRun(_ writer: SubtitlePacketStore.Writer) -> Span? {
+        open[writer]
     }
 
     /// Every span this ledger holds, open runs included, sorted by start. Small by construction

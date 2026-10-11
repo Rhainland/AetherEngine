@@ -79,6 +79,19 @@ final class SubtitlePacketStore: @unchecked Sendable {
         var payload: Data
     }
 
+    /// #362: the span the forward prefetch's current run has read on one stream and the store still
+    /// holds, as of one instant. See `provesReadSpan`.
+    struct ReadProof: Sendable {
+        let from: Double
+        let through: Double
+
+        static let none = ReadProof(from: .infinity, through: -.infinity)
+
+        func proves(from: Double, through: Double) -> Bool {
+            from.isFinite && through.isFinite && from >= self.from && through <= self.through
+        }
+    }
+
     private struct PendingKey: Hashable {
         let streamIndex: Int32
         let writer: Writer
@@ -200,7 +213,8 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// Whether the forward prefetch's current run read the whole span and this stream still holds
     /// what it read there. Stricter than `hasReadSpan` on purpose: a caller that drops a precaution
     /// on this answer needs proof, so an empty ledger, a span bridged by seam tolerance, ground the
-    /// store has since evicted, and ground before the run's first read all answer no. So does the
+    /// store has since evicted, ground before the run's first read, and a span reaching the
+    /// prefetch's display set still in assembly all answer no. So does the
     /// pump's coverage, which is a claim from the playhead (`noteHarvestReach`) rather than
     /// observed reading, and can run ahead of what the pump has stored during a slow seek.
     ///
@@ -208,9 +222,29 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// until the new one reads it again; a seam there holds as it did before this proof existed.
     func provesReadSpan(streamIndex: Int32, from: Double, through: Double) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard let prefetchReadFrom, from >= prefetchReadFrom else { return false }
-        if let evicted = evictedThroughByStream[streamIndex], from <= evicted { return false }
-        return coverage.currentRunContains(.prefetch, from: from, through: through)
+        return readProofLocked(streamIndex: streamIndex).proves(from: from, through: through)
+    }
+
+    /// `entries(streamIndex:from:through:)` with the read proof as of the same instant. A caller
+    /// judging the seams of that window must use this proof: reading that lands after the copy
+    /// stores packets the copy lacks.
+    func entriesWithReadProof(streamIndex: Int32, from: Double,
+                              through: Double) -> (entries: [StoredSubtitlePacket], readProof: ReadProof) {
+        lock.lock(); defer { lock.unlock() }
+        return (entriesLocked(streamIndex: streamIndex, from: from, through: through),
+                readProofLocked(streamIndex: streamIndex))
+    }
+
+    private func readProofLocked(streamIndex: Int32) -> ReadProof {
+        guard let prefetchReadFrom, let run = coverage.currentRun(.prefetch) else { return .none }
+        var from = max(prefetchReadFrom, run.from)
+        if let evicted = evictedThroughByStream[streamIndex] { from = max(from, evicted.nextUp) }
+        var through = run.through
+        // A display set in assembly was read, but is stored only once its END arrives.
+        if let pending = pendingSetByStream[PendingKey(streamIndex: streamIndex, writer: .prefetch)] {
+            through = min(through, pending.ptsSeconds.nextDown)
+        }
+        return ReadProof(from: from, through: through)
     }
 
     /// Introspection for tests and diagnostics.
@@ -531,6 +565,10 @@ final class SubtitlePacketStore: @unchecked Sendable {
 
     func entries(streamIndex: Int32, from: Double, through: Double) -> [StoredSubtitlePacket] {
         lock.lock(); defer { lock.unlock() }
+        return entriesLocked(streamIndex: streamIndex, from: from, through: through)
+    }
+
+    private func entriesLocked(streamIndex: Int32, from: Double, through: Double) -> [StoredSubtitlePacket] {
         guard let entries = entriesByStream[streamIndex] else { return [] }
         // The run is PTS-sorted, so the window is found by search instead of a scan of the session.
         return Array(entries[Self.lowerBound(entries, from)...].prefix { $0.ptsSeconds <= through })

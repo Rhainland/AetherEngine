@@ -431,8 +431,8 @@ extension AetherEngine {
                     tally: tally, isReset: isReset)
                 continue
             }
-            let entries = store.entries(streamIndex: streamIndex,
-                                        from: window.from, through: window.through)
+            let (entries, readProof) = store.entriesWithReadProof(streamIndex: streamIndex,
+                                                                  from: window.from, through: window.through)
             // #271: bound the batch, on a PTS boundary. The window is bounded in seconds of
             // content, so on a dense track it is thousands of packets and this loop has no
             // suspension point. A text drain behind the urgent horizon takes everything up to it.
@@ -461,10 +461,8 @@ extension AetherEngine {
             // the island is what the viewer is about to need, and waiting would dark the overlay
             // for content that IS stored. That, not the tick budget, is the real bound. So does a
             // run having read the span since: the hole has been filled even if no packet in the
-            // window carries that run's sequence.
-            let spanRead: (Double, Double) -> Bool = {
-                store.provesReadSpan(streamIndex: streamIndex, from: $0, through: $1)
-            }
+            // window carries that run's sequence. Judged as of the copy in `entries`.
+            let spanRead: (Double, Double) -> Bool = { readProof.proves(from: $0, through: $1) }
             if let heldAt = held?.harvestGapAt, heldAt >= playhead,
                (held?.harvestGapTicksLeft ?? 0) > 0, !isReset,
                !SubtitleOverlayDrainer.harvestGapHoldResumes(

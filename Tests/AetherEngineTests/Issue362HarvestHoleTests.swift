@@ -225,6 +225,38 @@ struct Issue362HarvestHoleTests {
         #expect(!store.provesReadSpan(streamIndex: 3, from: 199, through: 220), "nothing before the anchor")
     }
 
+    @Test("a seam is judged by the proof captured with the entries it sits in")
+    func proofIsCapturedWithItsEntries() {
+        let store = SubtitlePacketStore()
+        store.notePrefetchRead(from: 0, through: 100)
+        let (_, proof) = store.entriesWithReadProof(streamIndex: 3, from: 0, through: 200)
+        // The prefetch reads on and stores 101-119 after the copy was taken.
+        for pts in [105.0, 110.0] { harvest(store, at: pts) }
+        store.noteHarvestProgress(.prefetch, through: 120)
+        #expect(store.provesReadSpan(streamIndex: 3, from: 100, through: 120))
+        #expect(!proof.proves(from: 100, through: 120), "the copy lacks what was read after it")
+        #expect(proof.proves(from: 50, through: 100))
+    }
+
+    @Test("a display set still in assembly is read but not stored, so it proves nothing")
+    func pendingDisplaySetCapsTheProof() {
+        let store = SubtitlePacketStore()
+        store.notePrefetchRead(from: 0, through: 100)
+        let pcs = Data([0x16, 0x00, 0x01, 0x00]), end = Data([0x80, 0x00, 0x00])
+        func chunk(_ payload: Data, writer: SubtitlePacketStore.Writer = .prefetch) {
+            store.harvestChunk(streamIndex: 3, ptsSeconds: 110, durationSeconds: 0, flags: 0,
+                               payload: payload, assembleSplitDisplaySets: true, writer: writer)
+        }
+        chunk(pcs)
+        chunk(pcs, writer: .pump)
+        store.noteHarvestProgress(.prefetch, through: 120)
+        #expect(store.provesReadSpan(streamIndex: 3, from: 100, through: 109))
+        #expect(!store.provesReadSpan(streamIndex: 3, from: 100, through: 120))
+        chunk(end)
+        #expect(store.provesReadSpan(streamIndex: 3, from: 100, through: 120),
+                "stored once its END arrives; the pump's own set in assembly does not matter")
+    }
+
     private func harvest(_ store: SubtitlePacketStore, at pts: Double) {
         store.harvestChunk(streamIndex: 3, ptsSeconds: pts, durationSeconds: 0, flags: 0,
                            payload: Data(count: 8), assembleSplitDisplaySets: false, writer: .prefetch)
