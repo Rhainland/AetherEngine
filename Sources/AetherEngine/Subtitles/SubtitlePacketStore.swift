@@ -389,7 +389,11 @@ final class SubtitlePacketStore: @unchecked Sendable {
             guard totalBytes > lowWater else { break }
             // Audit SUB-111: an unfinished display set of a cold stream goes before anything complete.
             for writer in [Writer.pump, Writer.prefetch] {
-                _ = takePendingLocked(PendingKey(streamIndex: idx, writer: writer))
+                // The prefetch read that set, and no read proof may reach past it now.
+                if let dropped = takePendingLocked(PendingKey(streamIndex: idx, writer: writer)),
+                   writer == .prefetch {
+                    noteEvictedLocked(idx, through: dropped.ptsSeconds)
+                }
             }
             guard totalBytes > lowWater, var entries = entriesByStream.removeValue(forKey: idx) else {
                 if entriesByStream[idx] == nil { lastTouchByStream[idx] = nil }

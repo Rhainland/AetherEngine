@@ -257,6 +257,21 @@ struct Issue362HarvestHoleTests {
                 "stored once its END arrives; the pump's own set in assembly does not matter")
     }
 
+    @Test("a display set in assembly that memory pressure drops still bounds the proof")
+    func evictedPendingSetBoundsTheProof() {
+        let store = SubtitlePacketStore(perStreamByteCap: 10_000, aggregateByteCap: 1_000)
+        store.notePrefetchRead(from: 0, through: 100)
+        let pcs = Data([0x16, 0x02, 0x55]) + Data(count: 597)
+        store.harvestChunk(streamIndex: 3, ptsSeconds: 110, durationSeconds: 0, flags: 0,
+                           payload: pcs, assembleSplitDisplaySets: true, writer: .prefetch)
+        store.noteHarvestProgress(.prefetch, through: 120)
+        // Another stream's packet pushes the store over its budget; stream 3 is the cold one.
+        store.append(streamIndex: 4, ptsSeconds: 115, durationSeconds: 0, payload: Data(count: 600))
+        #expect(store.totalRetainedBytes <= 1_000)
+        #expect(!store.provesReadSpan(streamIndex: 3, from: 100, through: 120),
+                "the dropped set was read but never stored")
+    }
+
     private func harvest(_ store: SubtitlePacketStore, at pts: Double) {
         store.harvestChunk(streamIndex: 3, ptsSeconds: pts, durationSeconds: 0, flags: 0,
                            payload: Data(count: 8), assembleSplitDisplaySets: false, writer: .prefetch)
