@@ -28,13 +28,37 @@ enum RemoteHLSTimestampAnchor {
     /// already carries source time.
     static let negligibleSeconds = 0.1
 
-    /// The anchor the renditions are served with, given what the probe measured. Only a positive offset
-    /// is one of the media timestamps: a muxer delay (ffmpeg MPEG-TS adds 1.4 s by default, 10 s with
-    /// `-max_delay 5000000`) only ever moves them later. A segment whose media starts before its playlist
-    /// slot is an origin that restarted its transcode at the keyframe before the slot (Jellyfin:
-    /// `-noaccurate_seek -copyts`); its media timestamps are still source time, so the plain body
-    /// already lands on the frames, and AE#616 measures the lead of item time off it. Mapping that gap
-    /// would show every cue early by it and hide the lead from AE#616.
+    /// The anchor the renditions are served with, given what the probe measured: the measurement when it
+    /// is positive, otherwise nil (the plain body).
+    ///
+    /// On a `-copyts` origin the probe observes one number, `D - G`, but the map has to be `D` alone:
+    /// - `D` is the muxer delay, constant for the session, and it only moves timestamps later (ffmpeg
+    ///   MPEG-TS adds 1.4 s by default and 10 s with `-max_delay 5000000`; fMP4 adds none).
+    /// - `G` is the keyframe-restart gap: how far before its playlist slot the first segment of a
+    ///   started or restarted transcode begins, when the origin restarts at the keyframe before the slot
+    ///   (Jellyfin: `-noaccurate_seek -copyts`). Only that first segment carries it.
+    ///
+    /// The rule is exact only when `D == 0` or `G == 0`. When `G == 0`, the positive measurement is `D`.
+    /// When `D == 0`, the media is already on source time, so the plain body lands on the frames and
+    /// AE#616 measures the lead of item time off it. Mapping a negative measurement instead would show
+    /// every cue early by `G` and hide that lead from AE#616.
+    ///
+    /// When both are nonzero, the result is wrong by an amount AE#616 cannot see, because AE#616 measures
+    /// item time against these same cues and its reference moves with the map:
+    /// - `0 < G < D`: the map is `D - G`, every cue shows `G` early, AE#616 measures about 0, and its
+    ///   `sourceTime` also leads by `G`.
+    /// - `G > D`: the plain body shows every cue `D` early, AE#616 measures `G - D`, and its `sourceTime`
+    ///   is off by `D`.
+    /// An MPEG-TS origin with a muxer delay that resumes by restarting at the previous keyframe is in
+    /// this case on every resumed load. Silo's own HLS output is not: it cuts MPEG-TS with
+    /// `-copyts -max_delay 5000000` (`D` = 10 s), but a re-encode seeks accurately to a segment boundary
+    /// with keyframes forced on boundaries, and a stream copy starts its playlist at the keyframe it
+    /// actually begins on, so `G` is 0 in both.
+    ///
+    /// A possible fix: `D` is a session constant and `G` affects only the first segment of a job, so
+    /// probing the segment after the start segment (same job, and AVPlayer requests it next) would read
+    /// `D` directly. That holds only if the origin forces keyframes on slot boundaries, which a stream
+    /// copy does not, so it would need a fallback there.
     static func renditionAnchor(measured: Double) -> Double? {
         measured < negligibleSeconds ? nil : measured
     }
