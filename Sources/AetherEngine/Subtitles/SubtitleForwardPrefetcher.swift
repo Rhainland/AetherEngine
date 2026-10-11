@@ -317,7 +317,7 @@ enum SubtitleForwardPrefetcher {
                 // it got to and this anchor is ground nobody read. Stated as the anchor the reader
                 // ASKED for, not where the seek landed: a subtitle-axis seek lands at or before the
                 // request, so this under-claims by up to one authored gap and never over-claims.
-                store.noteHarvestAnchor(.prefetch, at: target.seconds, verified: landed == .seek)
+                store.noteHarvestAnchor(.prefetch, at: target.seconds)
                 lastCoverageNoted = -Double.infinity
                 anchorGraceUntil = DispatchTime.now()
                     + (link?.anchorGraceSeconds ?? SideReaderLinkPolicy.anchorGraceSeconds)

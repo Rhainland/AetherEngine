@@ -117,8 +117,11 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// began. Coverage records what was read, not what is still held, so a span at or behind this
     /// may have been read and dropped since. A new run re-reads its ground and stores it again.
     private var evictedThroughByStream: [Int32: Double] = [:]
-    /// Whether the prefetch's current run began at a verified position; see `noteHarvestAnchor`.
-    private var prefetchRunIsVerified = false
+    /// Where the prefetch's current run was announced, and where it is known to have read from:
+    /// the later of that and the first position it read after the announcement. Nil until it has
+    /// read something. See `provesReadSpan`.
+    private var prefetchAnchor: Double?
+    private var prefetchReadFrom: Double?
     private var protectedStreams: Set<Int32> = []
     private var lastTouchByStream: [Int32: UInt64] = [:]
     private var touchCounter: UInt64 = 0
@@ -149,16 +152,12 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// #416: a reader has positioned at `seconds` and reads forwards from there. Announced by every
     /// reposition of every reader that writes here, because an unannounced one would let the run
     /// below be extended across ground nobody read.
-    ///
-    /// `verified` says the reader is known to read from at or before `seconds`: a timestamp seek on
-    /// the subtitle axis. A byte-estimate fallback can overshoot and a failed positioning leaves the
-    /// reader wherever it was, so a prefetch run anchored that way still counts for `hasReadSpan`
-    /// but proves nothing to `provesReadSpan`.
-    func noteHarvestAnchor(_ writer: Writer, at seconds: Double, verified: Bool = false) {
+    func noteHarvestAnchor(_ writer: Writer, at seconds: Double) {
         lock.lock(); defer { lock.unlock() }
         coverage.noteAnchor(writer, at: seconds)
-        if writer == .prefetch {
-            prefetchRunIsVerified = verified
+        if writer == .prefetch, seconds.isFinite {
+            prefetchAnchor = seconds
+            prefetchReadFrom = nil
             evictedThroughByStream.removeAll()
         }
     }
@@ -166,6 +165,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// #416: that reader's current run has read one step further, through `seconds`.
     func noteHarvestProgress(_ writer: Writer, through seconds: Double) {
         lock.lock(); defer { lock.unlock() }
+        noteFirstReadLocked(writer, at: seconds)
         coverage.noteProgress(writer, through: seconds)
     }
 
@@ -174,7 +174,17 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// `SubtitleHarvestCoverage.noteReach`.
     func noteHarvestReach(_ writer: Writer, through seconds: Double) {
         lock.lock(); defer { lock.unlock() }
+        noteFirstReadLocked(writer, at: seconds)
         coverage.noteReach(writer, through: seconds)
+    }
+
+    /// The prefetch announces its anchor where it ASKED to be, and a seek can land after that: a
+    /// byte estimate overshoots, a failed positioning leaves the reader where it was, and Matroska
+    /// clamps a target to the anchor stream's first indexed cue. The first position it reads is
+    /// where its reading demonstrably begins.
+    private func noteFirstReadLocked(_ writer: Writer, at seconds: Double) {
+        guard writer == .prefetch, prefetchReadFrom == nil, seconds.isFinite else { return }
+        prefetchReadFrom = max(prefetchAnchor ?? seconds, seconds)
     }
 
     /// #416: was the whole span between `from` and `through` read by some run this session?
@@ -190,7 +200,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// Whether the forward prefetch's current run read the whole span and this stream still holds
     /// what it read there. Stricter than `hasReadSpan` on purpose: a caller that drops a precaution
     /// on this answer needs proof, so an empty ledger, a span bridged by seam tolerance, ground the
-    /// store has since evicted, and a run from an unverified position all answer no. So does the
+    /// store has since evicted, and ground before the run's first read all answer no. So does the
     /// pump's coverage, which is a claim from the playhead (`noteHarvestReach`) rather than
     /// observed reading, and can run ahead of what the pump has stored during a slow seek.
     ///
@@ -198,7 +208,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// until the new one reads it again; a seam there holds as it did before this proof existed.
     func provesReadSpan(streamIndex: Int32, from: Double, through: Double) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard prefetchRunIsVerified else { return false }
+        guard let prefetchReadFrom, from >= prefetchReadFrom else { return false }
         if let evicted = evictedThroughByStream[streamIndex], from <= evicted { return false }
         return coverage.currentRunContains(.prefetch, from: from, through: through)
     }
@@ -427,7 +437,10 @@ final class SubtitlePacketStore: @unchecked Sendable {
         // #416: a harvested packet is a position its writer demonstrably read, so the run reaches
         // it. This is what gives the pump the forward lookahead its playhead-based note cannot
         // state, which is the region a backward seek into already-produced content lands in.
-        if let ptsSeconds { coverage.noteReach(writer, through: ptsSeconds) }
+        if let ptsSeconds {
+            noteFirstReadLocked(writer, at: ptsSeconds)
+            coverage.noteReach(writer, through: ptsSeconds)
+        }
         guard assembleSplitDisplaySets else {
             guard let ptsSeconds else { return }
             appendLocked(streamIndex: streamIndex, ptsSeconds: ptsSeconds,
@@ -586,7 +599,8 @@ final class SubtitlePacketStore: @unchecked Sendable {
         appendCounter = 0
         coverage = SubtitleHarvestCoverage()
         evictedThroughByStream.removeAll()
-        prefetchRunIsVerified = false
+        prefetchAnchor = nil
+        prefetchReadFrom = nil
     }
 
     private func noteEvictedLocked(_ streamIndex: Int32, through pts: Double) {

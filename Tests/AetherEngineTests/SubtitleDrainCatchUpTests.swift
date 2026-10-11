@@ -184,8 +184,7 @@ struct SubtitleDrainCatchUpTests {
                              durationSeconds: 1.0 / 24, payload: Data("sign \(index)".utf8))
             }
             if recordsCoverage {
-                store.noteHarvestAnchor(.prefetch, at: 0, verified: true)
-                store.noteHarvestReach(.prefetch, through: 60)
+                store.notePrefetchRead(from: 0, through: 60)
                 store.noteHarvestAnchor(.pump, at: 0)
                 store.noteHarvestReach(.pump, through: 4.38)
             }
@@ -211,8 +210,7 @@ struct SubtitleDrainCatchUpTests {
         let held = try #require(engine.subtitleDrainCursors[.primary]?.harvestGapAt, "held at the seam")
         #expect(abs(held - 4.38) < 1e-9)
 
-        store.noteHarvestAnchor(.prefetch, at: 0, verified: true)
-        store.noteHarvestReach(.prefetch, through: 60)
+        store.notePrefetchRead(from: 0, through: 60)
         engine.subtitleDrainTick()
         #expect(engine.subtitleDrainCursors[.primary]?.harvestGapAt == nil)
         #expect((engine.subtitleCues.map(\.startTime).max() ?? -1)
@@ -250,5 +248,15 @@ private struct SplitMix {
         z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
         z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
         return z ^ (z >> 31)
+    }
+}
+
+extension SubtitlePacketStore {
+    /// The forward prefetch positioned at `from`, read its first packet there, and read on through
+    /// `through`.
+    func notePrefetchRead(from: Double, through: Double) {
+        noteHarvestAnchor(.prefetch, at: from)
+        noteHarvestProgress(.prefetch, through: from)
+        noteHarvestReach(.prefetch, through: through)
     }
 }

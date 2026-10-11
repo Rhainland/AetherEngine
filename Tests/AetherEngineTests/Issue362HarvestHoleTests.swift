@@ -157,8 +157,7 @@ struct Issue362HarvestHoleTests {
         let store = SubtitlePacketStore()
         #expect(store.hasReadSpan(from: 1, through: 2))
         #expect(!store.provesReadSpan(streamIndex: 3, from: 1, through: 2))
-        store.noteHarvestAnchor(.prefetch, at: 0, verified: true)
-        store.noteHarvestReach(.prefetch, through: 60)
+        store.notePrefetchRead(from: 0, through: 60)
         #expect(store.provesReadSpan(streamIndex: 3, from: 4.38, through: 4.40))
         #expect(!store.provesReadSpan(streamIndex: 3, from: 59, through: 61))
     }
@@ -168,10 +167,8 @@ struct Issue362HarvestHoleTests {
         // One prefetch run read to 4.38 and stopped; the next started at 4.60. The ledger's seam
         // tolerance joins them for `hasReadSpan`, but nobody read the 0.22 s between.
         let store = SubtitlePacketStore()
-        store.noteHarvestAnchor(.prefetch, at: 0, verified: true)
-        store.noteHarvestProgress(.prefetch, through: 4.38)
-        store.noteHarvestAnchor(.prefetch, at: 4.60, verified: true)
-        store.noteHarvestProgress(.prefetch, through: 30)
+        store.notePrefetchRead(from: 0, through: 4.38)
+        store.notePrefetchRead(from: 4.60, through: 30)
         #expect(store.hasReadSpan(from: 4.38, through: 4.60))
         #expect(!store.provesReadSpan(streamIndex: 3, from: 4.38, through: 4.60))
         #expect(store.provesReadSpan(streamIndex: 3, from: 4.60, through: 30))
@@ -191,8 +188,7 @@ struct Issue362HarvestHoleTests {
     @Test("ground the store has evicted is not proven read, however it was covered")
     func evictedGroundProvesNothing() {
         let store = SubtitlePacketStore()
-        store.noteHarvestAnchor(.prefetch, at: 0, verified: true)
-        store.noteHarvestReach(.prefetch, through: 60)
+        store.notePrefetchRead(from: 0, through: 60)
         for pts in [1.0, 2.0, 3.0, 40.0] {
             store.append(streamIndex: 3, ptsSeconds: pts, durationSeconds: 0, payload: Data(count: 8))
         }
@@ -201,24 +197,32 @@ struct Issue362HarvestHoleTests {
         #expect(store.provesReadSpan(streamIndex: 3, from: 2.5, through: 30))
         #expect(store.provesReadSpan(streamIndex: 4, from: 1.5, through: 30), "eviction is per stream")
         // A new prefetch run reads the ground again and stores what the prune removed.
-        store.noteHarvestAnchor(.prefetch, at: 0, verified: true)
+        store.noteHarvestAnchor(.prefetch, at: 0)
         for pts in [1.0, 2.0] { harvest(store, at: pts) }
         store.noteHarvestProgress(.prefetch, through: 30)
         #expect(store.entries(streamIndex: 3, from: 0, through: 30).map(\.ptsSeconds) == [1, 2, 3])
         #expect(store.provesReadSpan(streamIndex: 3, from: 1.5, through: 30))
     }
 
-    @Test("a prefetch run from an unverified position proves nothing")
-    func unverifiedLandingProvesNothing() {
-        // A byte-estimate fallback asked for 100 s may have landed at 120 s; its first packet there
-        // must not prove 100-120 s read.
+    @Test("a prefetch run proves reading only from the first position it read")
+    func proofStartsAtTheFirstRead() {
+        // Asked for 100 s, the seek landed at 120 s: a byte estimate that overshot, or Matroska
+        // clamping to the anchor stream's first indexed cue. Its first packet there must not prove
+        // 100-120 s read.
         let store = SubtitlePacketStore()
         store.noteHarvestAnchor(.prefetch, at: 100)
         harvest(store, at: 120)
         store.noteHarvestProgress(.prefetch, through: 130)
         #expect(store.hasReadSpan(from: 100, through: 120), "the generous ledger still counts it")
         #expect(!store.provesReadSpan(streamIndex: 3, from: 100, through: 120))
-        #expect(!store.provesReadSpan(streamIndex: 3, from: 121, through: 129))
+        #expect(store.provesReadSpan(streamIndex: 3, from: 121, through: 129))
+
+        // Landing before the anchor proves from the anchor on.
+        store.noteHarvestAnchor(.prefetch, at: 200)
+        harvest(store, at: 198)
+        store.noteHarvestProgress(.prefetch, through: 230)
+        #expect(store.provesReadSpan(streamIndex: 3, from: 200, through: 220))
+        #expect(!store.provesReadSpan(streamIndex: 3, from: 199, through: 220), "nothing before the anchor")
     }
 
     private func harvest(_ store: SubtitlePacketStore, at pts: Double) {
