@@ -135,6 +135,9 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// read something. See `provesReadSpan`.
     private var prefetchAnchor: Double?
     private var prefetchReadFrom: Double?
+    /// Streams the prefetch's current run read a packet of without storing it, at a position it
+    /// could not tell. Nothing on them is proven until the next run.
+    private var prefetchDroppedStreams: Set<Int32> = []
     private var protectedStreams: Set<Int32> = []
     private var lastTouchByStream: [Int32: UInt64] = [:]
     private var touchCounter: UInt64 = 0
@@ -171,6 +174,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
         if writer == .prefetch, seconds.isFinite {
             prefetchAnchor = seconds
             prefetchReadFrom = nil
+            prefetchDroppedStreams.removeAll()
             evictedThroughByStream.removeAll()
         }
     }
@@ -235,8 +239,16 @@ final class SubtitlePacketStore: @unchecked Sendable {
                 readProofLocked(streamIndex: streamIndex))
     }
 
+    /// #362: the prefetch read a subtitle packet on `streamIndex` and dropped it without a usable
+    /// time base.
+    func notePrefetchDroppedPacket(streamIndex: Int32) {
+        lock.lock(); defer { lock.unlock() }
+        prefetchDroppedStreams.insert(streamIndex)
+    }
+
     private func readProofLocked(streamIndex: Int32) -> ReadProof {
-        guard let prefetchReadFrom, let run = coverage.currentRun(.prefetch) else { return .none }
+        guard !prefetchDroppedStreams.contains(streamIndex), let prefetchReadFrom,
+              let run = coverage.currentRun(.prefetch) else { return .none }
         var from = max(prefetchReadFrom, run.from)
         if let evicted = evictedThroughByStream[streamIndex] { from = max(from, evicted.nextUp) }
         var through = run.through
@@ -514,7 +526,9 @@ final class SubtitlePacketStore: @unchecked Sendable {
                                             flags: flags, payload: Data())
             }
             guard var open = pending else {
-                // Mid-set start (backfill landed between PCS and END): not decodable, drop.
+                // Mid-set start (backfill landed between PCS and END): not decodable, drop. The
+                // composition it belongs to was not stored either.
+                if writer == .prefetch, let ptsSeconds { noteEvictedLocked(streamIndex, through: ptsSeconds) }
                 return
             }
             pending = nil
@@ -646,6 +660,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
         evictedThroughByStream.removeAll()
         prefetchAnchor = nil
         prefetchReadFrom = nil
+        prefetchDroppedStreams.removeAll()
     }
 
     /// A display set the prefetch read is dropped without being stored, so read proof must not

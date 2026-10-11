@@ -305,6 +305,28 @@ struct Issue362HarvestHoleTests {
         #expect(tail.provesReadSpan(streamIndex: 3, from: 121, through: 130))
     }
 
+    @Test("a subtitle packet the prefetch read but did not store bounds the proof")
+    func unstoredPrefetchReadsBoundTheProof() {
+        // A continuation chunk with no set open: the prefetch landed between a PCS and its END.
+        let midSet = SubtitlePacketStore()
+        midSet.notePrefetchRead(from: 0, through: 100)
+        midSet.harvestChunk(streamIndex: 3, ptsSeconds: 110, durationSeconds: 0, flags: 0,
+                            payload: Data([0x15, 0x00, 0x01, 0x00]), assembleSplitDisplaySets: true,
+                            writer: .prefetch)
+        midSet.noteHarvestProgress(.prefetch, through: 130)
+        #expect(!midSet.provesReadSpan(streamIndex: 3, from: 100, through: 130))
+        #expect(midSet.provesReadSpan(streamIndex: 3, from: 111, through: 130))
+
+        // A packet dropped for want of a time base, at a position nobody knows.
+        let noTimeBase = SubtitlePacketStore()
+        noTimeBase.notePrefetchRead(from: 0, through: 130)
+        noTimeBase.notePrefetchDroppedPacket(streamIndex: 3)
+        #expect(!noTimeBase.provesReadSpan(streamIndex: 3, from: 100, through: 130))
+        #expect(noTimeBase.provesReadSpan(streamIndex: 4, from: 100, through: 130), "only that stream")
+        noTimeBase.notePrefetchRead(from: 0, through: 130)
+        #expect(noTimeBase.provesReadSpan(streamIndex: 3, from: 100, through: 130), "a new run reads it again")
+    }
+
     private func harvest(_ store: SubtitlePacketStore, at pts: Double) {
         store.harvestChunk(streamIndex: 3, ptsSeconds: pts, durationSeconds: 0, flags: 0,
                            payload: Data(count: 8), assembleSplitDisplaySets: false, writer: .prefetch)
