@@ -530,7 +530,8 @@ final class SubtitlePacketStore: @unchecked Sendable {
             open.payload.append(consumed)
             open.flags |= flags
             if open.payload.count > Self.maxPendingDisplaySetBytes {
-                noteDroppedSetLocked(open, streamIndex: streamIndex, writer: writer)
+                // The rest of this packet, which can hold a whole next set, goes with it.
+                noteDroppedSetLocked(open, streamIndex: streamIndex, writer: writer, through: ptsSeconds)
                 return
             }
             if endBoundary != nil {
@@ -648,9 +649,12 @@ final class SubtitlePacketStore: @unchecked Sendable {
     }
 
     /// A display set the prefetch read is dropped without being stored, so read proof must not
-    /// reach past it until the prefetch reads that ground again.
-    private func noteDroppedSetLocked(_ set: PendingDisplaySet, streamIndex: Int32, writer: Writer) {
-        if writer == .prefetch { noteEvictedLocked(streamIndex, through: set.ptsSeconds) }
+    /// reach past it, or past `packetPts` when the rest of its packet is dropped too, until the
+    /// prefetch reads that ground again.
+    private func noteDroppedSetLocked(_ set: PendingDisplaySet, streamIndex: Int32, writer: Writer,
+                                      through packetPts: Double? = nil) {
+        guard writer == .prefetch else { return }
+        noteEvictedLocked(streamIndex, through: max(set.ptsSeconds, packetPts ?? set.ptsSeconds))
     }
 
     private func noteEvictedLocked(_ streamIndex: Int32, through pts: Double) {

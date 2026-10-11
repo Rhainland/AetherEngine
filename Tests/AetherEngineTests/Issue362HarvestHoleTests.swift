@@ -294,6 +294,15 @@ struct Issue362HarvestHoleTests {
         chunk(oversize, Data([0x16, 0xFF, 0xFF]) + Data(count: SubtitlePacketStore.maxPendingDisplaySetBytes), at: 110)
         oversize.noteHarvestProgress(.prefetch, through: 130)
         #expect(!oversize.provesReadSpan(streamIndex: 3, from: 100, through: 130))
+
+        // The END that tips a set over the budget can share its packet with a whole next set.
+        let tail = SubtitlePacketStore()
+        tail.notePrefetchRead(from: 0, through: 100)
+        chunk(tail, Data([0x16, 0xFF, 0xFF]) + Data(count: SubtitlePacketStore.maxPendingDisplaySetBytes - 4), at: 110)
+        chunk(tail, end + pcs + end, at: 120)
+        tail.noteHarvestProgress(.prefetch, through: 130)
+        #expect(!tail.provesReadSpan(streamIndex: 3, from: 111, through: 130), "the set at 120 s was dropped")
+        #expect(tail.provesReadSpan(streamIndex: 3, from: 121, through: 130))
     }
 
     private func harvest(_ store: SubtitlePacketStore, at pts: Double) {
