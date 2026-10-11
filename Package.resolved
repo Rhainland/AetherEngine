@@ -1,5 +1,5 @@
 {
-  "originHash" : "aaad2851e63fbb5d8035f6ae9c6abb71e8e010beeeb30d2f9dbbe60ccd7022f6",
+  "originHash" : "a7c538250a98861022d56ad395d9ddb89c906dbebf35ccdce594611315aa87eb",
   "pins" : [
     {
       "identity" : "ffmpegbuild",
@@ -20,12 +20,12 @@
       }
     },
     {
-      "identity" : "siloobjectaudio",
+      "identity" : "libtruehd",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Silo-Server/SiloObjectAudio",
+      "location" : "https://github.com/superuser404notfound/LibTrueHD",
       "state" : {
-        "revision" : "645b91c072fafb60146151fd5127f8ff0ca38b6f",
-        "version" : "1.0.0"
+        "revision" : "7ac6b379cb5d77ff5f424bc9daa17131b044a962",
+        "version" : "2.0.0"
       }
     },
     {
