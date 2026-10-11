@@ -325,6 +325,23 @@ struct Issue362HarvestHoleTests {
         #expect(noTimeBase.provesReadSpan(streamIndex: 4, from: 100, through: 130), "only that stream")
         noTimeBase.notePrefetchRead(from: 0, through: 130)
         #expect(noTimeBase.provesReadSpan(streamIndex: 3, from: 100, through: 130), "a new run reads it again")
+
+        // A packet without a PTS is dropped at a position nobody knows either.
+        let noPTS = SubtitlePacketStore()
+        noPTS.notePrefetchRead(from: 0, through: 130)
+        noPTS.harvestChunk(streamIndex: 3, ptsSeconds: nil, durationSeconds: 0, flags: 0, payload: Data(count: 8),
+                           assembleSplitDisplaySets: false, writer: .prefetch)
+        #expect(!noPTS.provesReadSpan(streamIndex: 3, from: 100, through: 130))
+
+        // A landing between a PCS and its END: that composition began before the run.
+        let landing = SubtitlePacketStore()
+        landing.noteHarvestAnchor(.prefetch, at: 100)
+        landing.harvestChunk(streamIndex: 3, ptsSeconds: nil, durationSeconds: 0, flags: 0,
+                             payload: Data([0x15, 0x00, 0x01, 0x00]), assembleSplitDisplaySets: true,
+                             writer: .prefetch)
+        landing.noteHarvestProgress(.prefetch, through: 100)
+        landing.noteHarvestReach(.prefetch, through: 130)
+        #expect(landing.provesReadSpan(streamIndex: 3, from: 100, through: 130))
     }
 
     private func harvest(_ store: SubtitlePacketStore, at pts: Double) {

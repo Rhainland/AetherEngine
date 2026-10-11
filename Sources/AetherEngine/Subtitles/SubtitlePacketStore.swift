@@ -243,7 +243,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// time base.
     func notePrefetchDroppedPacket(streamIndex: Int32) {
         lock.lock(); defer { lock.unlock() }
-        prefetchDroppedStreams.insert(streamIndex)
+        noteUnstoredReadLocked(streamIndex, writer: .prefetch, at: nil)
     }
 
     private func readProofLocked(streamIndex: Int32) -> ReadProof {
@@ -490,7 +490,10 @@ final class SubtitlePacketStore: @unchecked Sendable {
             coverage.noteReach(writer, through: ptsSeconds)
         }
         guard assembleSplitDisplaySets else {
-            guard let ptsSeconds else { return }
+            guard let ptsSeconds else {
+                noteUnstoredReadLocked(streamIndex, writer: writer, at: nil)
+                return
+            }
             appendLocked(streamIndex: streamIndex, ptsSeconds: ptsSeconds,
                          durationSeconds: durationSeconds, flags: flags, payload: payload,
                          webvttSettings: webvttSettings)
@@ -520,15 +523,20 @@ final class SubtitlePacketStore: @unchecked Sendable {
                 }
                 pending = nil
                 guard let pts = ptsSeconds else {
-                    return   // No anchor for this set; skip its chunks until the next PCS.
+                    // No anchor for this set; skip its chunks until the next PCS.
+                    noteUnstoredReadLocked(streamIndex, writer: writer, at: nil)
+                    return
                 }
                 pending = PendingDisplaySet(ptsSeconds: pts, durationSeconds: durationSeconds,
                                             flags: flags, payload: Data())
             }
             guard var open = pending else {
                 // Mid-set start (backfill landed between PCS and END): not decodable, drop. The
-                // composition it belongs to was not stored either.
-                if writer == .prefetch, let ptsSeconds { noteEvictedLocked(streamIndex, through: ptsSeconds) }
+                // composition it belongs to was not stored either. Before this run's first read,
+                // that composition began before the landing, outside anything the run can prove.
+                if ptsSeconds != nil || prefetchReadFrom != nil {
+                    noteUnstoredReadLocked(streamIndex, writer: writer, at: ptsSeconds)
+                }
                 return
             }
             pending = nil
@@ -663,13 +671,22 @@ final class SubtitlePacketStore: @unchecked Sendable {
         prefetchDroppedStreams.removeAll()
     }
 
-    /// A display set the prefetch read is dropped without being stored, so read proof must not
-    /// reach past it, or past `packetPts` when the rest of its packet is dropped too, until the
-    /// prefetch reads that ground again.
+    /// A display set is dropped without being stored; with it goes the rest of its packet at
+    /// `packetPts`, when given.
     private func noteDroppedSetLocked(_ set: PendingDisplaySet, streamIndex: Int32, writer: Writer,
                                       through packetPts: Double? = nil) {
+        noteUnstoredReadLocked(streamIndex, writer: writer, at: max(set.ptsSeconds, packetPts ?? set.ptsSeconds))
+    }
+
+    /// #362: a subtitle packet read and not stored. When the prefetch read it, proof stops at its
+    /// position, or, when it has none, is withdrawn on that stream, until the prefetch's next run.
+    private func noteUnstoredReadLocked(_ streamIndex: Int32, writer: Writer, at pts: Double?) {
         guard writer == .prefetch else { return }
-        noteEvictedLocked(streamIndex, through: max(set.ptsSeconds, packetPts ?? set.ptsSeconds))
+        if let pts {
+            noteEvictedLocked(streamIndex, through: pts)
+        } else {
+            prefetchDroppedStreams.insert(streamIndex)
+        }
     }
 
     private func noteEvictedLocked(_ streamIndex: Int32, through pts: Double) {
