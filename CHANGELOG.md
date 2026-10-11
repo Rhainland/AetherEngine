@@ -12,6 +12,7 @@ the public-API contract.
 
 ### Changed
 
+- The TrueHD object decoder behind `objectAudioRendering` resolves from [LibTrueHD](https://github.com/superuser404notfound/LibTrueHD) 2.0.0, SiloObjectAudio's new name after its transfer (AE#731). The package is `LibTrueHD` and the product and module are `TrueHD`; the decoder and its C API are unchanged, and the xcframework is rebuilt from the same source.
 - CI runs the HLS, subtitle/resource authorization and live trust-evaluator suites in a separate test process so unrelated blocking tests cannot delay their resolvers. All tests and existing deadlines remain enforced.
 - Once a redirect chain has reached HTTPS, the engine drops credential headers (`Authorization`, `Cookie`, Emby/Jellyfin tokens) from every later HTTP hop, including headers returned by `HTTPRequestAuthorization`. A provider that authorizes every URL can no longer send its credentials in cleartext after a downgrade. The HTTP hop still runs, so anonymous redirects keep working, and an origin the host configured as HTTP still receives provider credentials.
 

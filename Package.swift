@@ -55,7 +55,7 @@ let package = Package(
         // TrueHD decoder that also decodes the Atmos object presentation (beds, objects, OAMD) for
         // `objectAudioRendering`. The Rust `truehd` crate (Apache-2.0) behind a C API, prebuilt as an
         // xcframework like LibDovi so consumers need no Rust. Pinned to the minor for the same reason.
-        .package(url: "https://github.com/Silo-Server/SiloObjectAudio", .upToNextMinor(from: "1.0.0")),  // 1.0.0: first release
+        .package(url: "https://github.com/superuser404notfound/LibTrueHD", .upToNextMinor(from: "2.0.0")),  // 2.0.0: SiloObjectAudio renamed after its transfer (AE#731): package LibTrueHD, product, module and xcframework TrueHD, same decoder and C API; 1.0.0: first release, as SiloObjectAudio
     ],
     targets: [
         .target(
@@ -63,7 +63,7 @@ let package = Package(
             dependencies: [
                 .product(name: "AetherFFmpegBuild", package: "FFmpegBuild"),
                 .product(name: "Dovi", package: "LibDovi"),
-                .product(name: "SiloObjectAudio", package: "SiloObjectAudio"),
+                .product(name: "TrueHD", package: "LibTrueHD"),
             ],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),

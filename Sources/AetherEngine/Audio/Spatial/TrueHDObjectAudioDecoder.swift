@@ -1,7 +1,7 @@
 import Foundation
-import SiloObjectAudio
+import TrueHD
 
-/// TrueHD object-presentation decoder over the SiloObjectAudio library (the Rust `truehd` crate behind
+/// TrueHD object-presentation decoder over the LibTrueHD library (the Rust `truehd` crate behind
 /// a C API): lossless decode of presentation 3, which for an Atmos stream is the bed plus up to 15
 /// dynamic objects, together with the object audio metadata (OAMD) that positions them.
 ///
