@@ -338,6 +338,14 @@ final class EmbeddedSubtitleDecoder {
             || id == AV_CODEC_ID_XSUB
     }
 
+    /// Whether the overlay drain may decode a catch-up batch of this codec in one tick; see
+    /// `SubtitleOverlayDrainer.tickCap`. A bitmap batch holds one decoded image per packet until
+    /// the apply half filters it, and teletext carries a packet per video frame whether or not a
+    /// caption changes, each a full libzvbi page decode.
+    static func drainCatchesUp(_ id: AVCodecID) -> Bool {
+        !isBitmapCodec(id) && id != AV_CODEC_ID_DVB_TELETEXT
+    }
+
     /// Decoder options for a subtitle codec. DVB teletext (libzvbi_teletextdec) emits ASS so colour
     /// override tags survive to the overlay (#107 colour); `txt_page` selects the caption page
     /// (`subtitle` = libzvbi auto-detect; an explicit page targets channels libzvbi does not flag,
