@@ -536,7 +536,8 @@ extension AetherEngine {
         // owns, and the same stand-in does that. With sidecars it mounts a relay behind the
         // rewritten master, without them the relay stands alone.
         let playbackURL = await prepareRemoteHLSStandIn(
-            originURL: url, options: options, expectedGeneration: bypassGeneration) ?? url
+            originURL: url, options: options, startPosition: startPosition,
+            expectedGeneration: bypassGeneration) ?? url
         // With a relay in front, the item AVPlayer fails is a loopback 502 and the refused handshake
         // happened out of its sight, so the classification has to be able to ask the side that made it.
         if let relay = remoteHLSSubtitleProxy?.server.relay {
@@ -650,6 +651,7 @@ extension AetherEngine {
     @MainActor
     private func prepareRemoteHLSStandIn(originURL: URL,
                                          options: LoadOptions,
+                                         startPosition: Double?,
                                          expectedGeneration: UInt64) async -> URL? {
         let mayNeedRelay = EngineTLS.serverTrustEvaluator != nil
             && originURL.scheme?.lowercased() == "https"
@@ -669,7 +671,9 @@ extension AetherEngine {
 
         guard let prepared = await RemoteHLSSubtitleProxy.prepare(
             originURL: originURL, tracks: tracks, httpHeaders: options.httpHeaders,
-            needsRelay: needsRelay) else { return nil }
+            needsRelay: needsRelay,
+            // Picks the segment the subtitle timestamp probe reads: the one this load opens on.
+            startPosition: startPosition) else { return nil }
         // The playlist fetches suspend; a load()/stop() can have superseded this session meanwhile, and a
         // proxy nobody owns would keep its socket and decode task for the rest of the process.
         guard loadGeneration == expectedGeneration else {

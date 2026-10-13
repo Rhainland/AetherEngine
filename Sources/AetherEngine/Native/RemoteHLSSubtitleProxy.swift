@@ -17,7 +17,9 @@ import Foundation
 /// one variant for the program duration and the VOD verdict), a rewrite, a socket. Anything that does
 /// not line up, and the sidecars stay overlay-only exactly as before. A load is never failed over a
 /// subtitle feature. A refusal with a relay wanted still stands the relay up on its own, because the
-/// media has nowhere else to go.
+/// media has nowhere else to go. The one read that is not a playlist, the head of a media segment for
+/// the renditions' `X-TIMESTAMP-MAP` (`RemoteHLSTimestampAnchor`), runs after the build, off the load
+/// path.
 enum RemoteHLSSubtitleProxy {
 
     /// A standing stand-in: the caller plays `masterURL` and owns the teardown.
@@ -54,13 +56,14 @@ enum RemoteHLSSubtitleProxy {
     static func prepare(originURL: URL,
                         tracks: [RemoteHLSSubtitleProvider.Track],
                         httpHeaders: [String: String],
-                        needsRelay: Bool) async -> Prepared? {
+                        needsRelay: Bool,
+                        startPosition: Double? = nil) async -> Prepared? {
         guard !tracks.isEmpty || needsRelay else { return nil }
         if !tracks.isEmpty {
             do {
                 let prepared = try await build(
                     originURL: originURL, tracks: tracks, httpHeaders: httpHeaders,
-                    needsRelay: needsRelay)
+                    needsRelay: needsRelay, startPosition: startPosition)
                 EngineLog.emit(
                     "[AetherEngine] #316: serving \(tracks.count) external subtitle rendition(s) over a "
                     + "rewritten master at \(prepared.masterURL.absoluteString), media "
@@ -120,7 +123,8 @@ enum RemoteHLSSubtitleProxy {
     private static func build(originURL: URL,
                               tracks: [RemoteHLSSubtitleProvider.Track],
                               httpHeaders: [String: String],
-                              needsRelay: Bool) async throws -> Prepared {
+                              needsRelay: Bool,
+                              startPosition: Double?) async throws -> Prepared {
         let session = makeSession()
         defer { session.finishTasksAndInvalidate() }
         // Audit NAT-105: the variant is whatever the master names, on any host or scheme, so the
@@ -129,8 +133,9 @@ enum RemoteHLSSubtitleProxy {
 
         let (body, finalURL) = try await fetchPlaylist(originURL, session: session, headers: httpHeaders)
         let parsed = try parse(body, at: finalURL)
-        let duration = try await programDuration(of: parsed, at: finalURL,
-                                                 session: session, credentials: credentials)
+        let variant = try await mediaPlaylist(of: parsed, body: body, at: finalURL,
+                                              session: session, credentials: credentials)
+        let duration = try sumSegmentDurations(variant.media.segments)
 
         let rewritten = try RemoteHLSMasterRewrite.rewriteDeclaringNames(
             originPlaylist: body,
@@ -171,6 +176,15 @@ enum RemoteHLSSubtitleProxy {
         // Decode up front: the rendition is fetched the moment the host selects it, and a whole-program
         // .vtt is fetched once and never again.
         provider.startFill()
+        // Anchor the renditions to the origin's media timestamps. Started now and not awaited: the
+        // segment it reads is the one the origin is producing for the player's first request, and the
+        // `.vtt` handler holds its answer for the probe the way it holds it for the decode.
+        if let target = RemoteHLSTimestampAnchor.target(mediaPlaylistBody: variant.body, media: variant.media,
+                                                        at: variant.url, startPosition: startPosition) {
+            provider.startTimestampAnchorProbe {
+                await RemoteHLSTimestampAnchor.probe(target, credentials: credentials)
+            }
+        }
         return Prepared(server: server, provider: provider, masterURL: masterURL,
                         renditionNames: rewritten.renditionNames)
     }
@@ -224,16 +238,18 @@ enum RemoteHLSSubtitleProxy {
         }
     }
 
-    /// Sum of the origin's own EXTINFs. A master is resolved through its first variant; the durations
-    /// are identical across variants, and one small GET buys both the length and the VOD verdict.
-    private static func programDuration(of playlist: HLSPlaylist,
-                                        at url: URL,
-                                        session: URLSession,
-                                        credentials: CredentialScope) async throws -> Double {
+    /// The media playlist the program duration (the sum of its EXTINFs) and the timestamp anchor are
+    /// read from. A master is resolved through its first variant; the durations are identical across
+    /// variants, and one small GET buys the length, the VOD verdict and the segment list.
+    private static func mediaPlaylist(of playlist: HLSPlaylist,
+                                      body: String,
+                                      at url: URL,
+                                      session: URLSession,
+                                      credentials: CredentialScope) async throws -> (media: HLSMediaPlaylist, body: String, url: URL) {
         switch playlist {
         case .media(let media):
             guard media.hasEndList else { throw Refusal.notVOD }
-            return try sumSegmentDurations(media.segments)
+            return (media, body, url)
         case .master(let master):
             guard let variant = master.variants.first,
                   let variantURL = HLSPlaylistParser.resolve(uri: variant.uri, against: url) else {
@@ -245,7 +261,7 @@ enum RemoteHLSSubtitleProxy {
                 throw Refusal.unusablePlaylist("variant is not a media playlist")
             }
             guard media.hasEndList else { throw Refusal.notVOD }
-            return try sumSegmentDurations(media.segments)
+            return (media, body, finalURL)
         }
     }
 

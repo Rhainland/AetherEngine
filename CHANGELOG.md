@@ -50,6 +50,16 @@ the public-API contract.
 
 ### Fixed
 
+- **External subtitles on a remote HLS source no longer appear early when the origin's media
+  timestamps do not start at its playlist's time 0.** The WebVTT renditions the engine injects
+  (#316) carried no `X-TIMESTAMP-MAP`, so AVPlayer pinned cue time 0 to timestamp 0, and an ffmpeg
+  MPEG-TS transcode cut with `-copyts -max_delay 5000000` showed every cue 10 s early. The engine now
+  reads the first media timestamp of the segment the load opens on, off the load path, and serves
+  the renditions with a matching `X-TIMESTAMP-MAP`. An origin already on its playlist timeline, one
+  whose segment starts before its playlist slot (a transcode restarted at the previous keyframe,
+  which AE#616 corrects), or one it cannot read keeps the plain WebVTT. An origin with both a muxer
+  delay and such a restart is still off by one of them (#763). Ported from Silo's fork
+  (Silo-Server/AetherEngine#14).
 - **A custom source that fails its probe says why (#745, thanks @yucelokan).** `.customSourceProbeFailed` now carries
   the probe error's `underlyingDomain` and `underlyingCode` in `errorInfo`, set before the terminal
   `.error` state, where it used to arrive with nothing but the generic message.
