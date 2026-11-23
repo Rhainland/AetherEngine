@@ -14,9 +14,11 @@ import Foundation
 /// A body that arrives in under `minimumReceivingMs` does not count, in bytes or in time: a short body
 /// on a warm connection, such as one HLS segment, arrives at the connection's burst rate, which can be
 /// twice what the link sustains. The bytes of a body's first chunk do not count either, because they
-/// arrived before anything timed them. Time in which several bodies were arriving counts once. Both
-/// rules match Silo Android's `PlaybackThroughputMeter`, so the two clients report the same quantity.
-/// A pause inside a body does count, which keeps the rate a lower bound.
+/// arrived before anything timed them. Time in which several bodies were arriving counts once. These
+/// three rules are Silo Android's `PlaybackThroughputMeter`'s. A pause inside a body does count, which
+/// keeps the rate a lower bound. Unlike Android's windowed `takeKbps`, these are running totals, so a
+/// host that diffs two readings can see a body that reached 1 s add its bytes without the time it
+/// shared with a body counted before the earlier reading.
 final class RelayTransferMeter: @unchecked Sendable {
     struct Totals: Equatable, Sendable {
         var bytes: Int64 = 0
